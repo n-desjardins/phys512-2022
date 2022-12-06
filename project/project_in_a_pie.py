@@ -3,6 +3,8 @@ import numba as nb
 from matplotlib import pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 import numpy.fft
+import imageio 
+import os
 
 def get_LT_NGP(ngrid, gridWidth, pos, periodic):
 
@@ -26,7 +28,7 @@ def get_rho(ngrid, gridWidth, LT_NGP, m, periodic):
             rho[int(gridCord[0])][int(gridCord[1])] += mass[i]
     else:
 
-        
+
         rho = np.zeros((ngrid*2,ngrid*2))
         for i in range(LT_NGP.shape[0]):
             gridCord  = LT_NGP[i]
@@ -87,14 +89,41 @@ def get_force(ngrid,gridWidth, LT_NGP,pot,periodic):
     return f
 
 
-def take_step(pos,v,f,dt):
+def take_frog_step(pos,v,f,dt):
     pos[:]=pos[:]+dt*v
     v[:]=v[:]+f*dt
     return pos, v
 
+def get_derivs(ngrid,gridWidth, xx,pot,periodic):
+    nn=xx.shape[0]//2
+    x=xx[:nn,:]
+    v=xx[nn:,:]
+    f=get_force(ngrid,gridWidth, x, pot,periodic)
+    return np.vstack([v,f])
+    
+def take_rk4_step(ngrid,gridWidth, LT_NGP,pos,v, pot,periodic, dt):
+
+    xx=np.vstack([LT_NGP,v])
+
+    k1=get_derivs(ngrid,gridWidth, xx,pot,periodic)
+    k2=get_derivs(ngrid,gridWidth, xx+k1*dt/2,pot,periodic)
+    k3=get_derivs(ngrid,gridWidth, xx+k2*dt/2,pot,periodic)
+    k4=get_derivs(ngrid,gridWidth, xx+k3*dt,pot,periodic)
+    
+    tot=(k1+2*k2+2*k3+k4)/6
+
+    if periodic:
+        nn=pos.shape[0]
+        pos=pos+(tot[:nn,:])*dt
+        v=v+tot[nn:,:]*dt
+    else:
+        nn=pos.shape[0]
+        pos=pos+tot[:nn,:]*dt
+        v=v+tot[nn:,:]*dt
+    return pos,v
 
 class particles:
-    def __init__(self,npart=10000,ngrid=1000, dx = 1, dt =0.02, soft=1,periodic=True):
+    def __init__(self,npart=10000,ngrid=1000, dx = 1, dt =0.05, soft=1,periodic=True):
         self.pos=np.empty([npart,2])
         self.m=np.empty(npart)
         self.f=np.empty([npart,2])
@@ -116,7 +145,7 @@ class particles:
 
     
     def ics_gauss(self):
-        self.pos[:]=np.random.randn(self.npart,2)*(self.ngrid/20)+self.ngrid
+        self.pos[:]=np.random.randn(self.npart,2)*(self.ngrid/20)+self.ngrid/2
         self.m[:]=1
         self.v[:]=0
 
@@ -136,24 +165,38 @@ class particles:
         self.v[:]=0
     
     def ics_2body(self):
-        #self.pos = np.array([[20.,25.],[30.,25.]])
-        #self.v = np.array([[0.,-0.5],[0.0,0.5]])
-        #self.m[:] = 8
-
-        self.pos = np.array([[45.,45.],[55.,45.]])
-        self.v = np.array([[0.,0.5],[0.0,-0.5]])
+        self.pos = np.array([[20.,25.],[30.,25.]])
+        self.v = np.array([[0.,-0.5],[0.0,0.5]])
         self.m[:] = 8
+
+        #self.pos = np.array([[45.,45.],[55.,45.]])
+        #self.v = np.array([[0.,0.5],[0.0,-0.5]])
+        #self.m[:] = 1
+
+    def ics_uniform_periodic(self):
+        rng = np.random.default_rng(123456789123456789)
+        self.pos[:]=rng.random((self.npart,2))*self.ngrid
+        self.m[:]=1
+        self.v[:]=0
+
+    def ics_uniform_non_periodic(self):
+        rng = np.random.default_rng(123456789123456789)
+        self.pos[:]=rng.random((self.npart,2))*self.ngrid+self.ngrid/2
+        self.m[:]=1
+        self.v[:]=0
 
 
 
     
 
-parts=particles(npart=2,ngrid=50, dx = 1, dt =0.02, soft=2,periodic=False)
-#parts=particles(npart=100000,ngrid=500, dx = 1, dt =0.02, soft=2,periodic=False)
+#parts=particles(npart=2,ngrid=50, dx = 1, dt =0.02, soft=2,periodic=True)
+parts=particles(npart=100000,ngrid=500, dx = 1, dt =0.01, soft=2,periodic=True)
 
 
 #parts.ics_gauss()
-parts.ics_2body()
+#parts.ics_uniform_non_periodic()
+parts.ics_uniform_periodic()
+#parts.ics_2body()
 parts.kernel = get_kernel(parts.ngrid, parts.soft, parts.periodic)
 
 plt.ion()
@@ -162,22 +205,41 @@ osamp=3
 plt.ion()
 fig = plt.figure()
 ax = fig.add_subplot(111)
-crap=ax.imshow(parts.rho[:parts.ngrid,:parts.ngrid]**0.5)
+NumberOfIterations = 30
 
-for i in range(1500):
+name = "rk4_periodic"
+
+#frames = []
+energy = np.zeros(NumberOfIterations)
+
+for i in range(NumberOfIterations):
     for j in range(osamp):
         parts.LT_NGP = get_LT_NGP(parts.ngrid, parts.gridWidth, parts.pos, parts.periodic)
         parts.rho = get_rho(parts.ngrid, parts.gridWidth, parts.LT_NGP, parts.m,parts.periodic)
         parts.pot = get_potential(parts.rho, parts.kernel, parts.ngrid , parts.periodic)
         parts.f = get_force(parts.ngrid, parts.gridWidth, parts.LT_NGP, parts.pot,parts.periodic)
-        parts.pos, parts.v = take_step(parts.pos, parts.v, parts.f, parts.dt)
+        #parts.pos, parts.v = take_frog_step(parts.pos, parts.v, parts.f, parts.dt)
+        parts.pos, parts.v = take_rk4_step(parts.ngrid,parts.gridWidth, parts.LT_NGP, parts.pos,parts.v, parts.pot,parts.periodic, parts.dt)
     kin=np.sum(parts.v**2)
     pot=np.sum(parts.rho*parts.pot)
-    print(kin,pot,kin-0.5*pot)
+    E = kin+pot
+    print(E)
     plt.clf()
-    plt.imshow(parts.rho)#,vmin=25,vmax=75)
+    plt.imshow(parts.rho);#,vmin=25,vmax=75)
     plt.colorbar()
-
-
-    crap.set_data(parts.rho[:parts.ngrid,:parts.ngrid]**0.5)
     plt.pause(0.0001)
+
+    energy[i] += E
+
+    #plt.savefig("frames/"+str(i)+".png")
+    #plt.close()
+    #frames.append("frames/"+str(i)+".png")
+
+np.savetxt(name +".csv", energy)
+
+#with imageio.get_writer("leapfrog_periodic.gif", mode="I") as writer:
+    #for frame in frames:
+        #image = imageio.imread(frame)
+       #writer.append_data(image)
+      
+
